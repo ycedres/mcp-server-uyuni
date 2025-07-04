@@ -94,6 +94,16 @@ Then, you can start the Model Context Protocol to Open API proxy server:
 ```
 uvx mcpo --port 9000  --config ./config.json
 ```
+## Run mcp as Streamable HTTP
+
+- First run the mcp server (by default it listens on port 8000):
+```
+uv run --env-file=/home/ygutierrez/src/mcp-server-uyuni/credentials.ygutierrez --directory /home/ygutierrez/src/mcp-server-uyuni/ mcp-server-uyuni --server-type streamable_http
+```
+- Then connect mcpo to the MCP server via HTTP.
+```
+mcpo --port 9000  --server-type "streamable_http" -- http://127.0.0.1:8000/mcp
+```
 
 ## Add the tool
 

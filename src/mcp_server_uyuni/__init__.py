@@ -12,16 +12,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .server import main_cli
-
-
-def main():
-    """MCP Uyuni Server"""
-    import asyncio
-
-    asyncio.run(main_cli())
-
-
-if __name__ == "__main__":
-    main()
-
+from .server import main
+main()

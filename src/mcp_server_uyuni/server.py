@@ -22,12 +22,12 @@ from mcp.server.fastmcp import FastMCP, Context
 from mcp import LoggingLevel, ServerSession
 
 # Initialize FastMCP server
-mcp = FastMCP("mcp-server-uyuni")
+mcp = FastMCP("mcp-server-uyuni", stateless_http=True)
 
 # Global variables for Uyuni connection - to be initialized in __main__
-url = ""
-username = ""
-password = ""
+url =  'https://' + os.environ.get('UYUNI_SERVER')
+username =  os.environ.get('UYUNI_USER')
+password = os.environ.get('UYUNI_PASS')
 
 async def _call_uyuni_api(
     client: httpx.AsyncClient,
@@ -788,23 +788,6 @@ async def cancel_action(action_id: int, ctx: Context, confirm: bool = False) -> 
             # The _call_uyuni_api helper already prints detailed errors.
             return f"Failed to cancel action: {action_id}. The API did not return success (expected 1, got {api_result}). Check server logs for details."
 
-def main_cli():
-    global url, username, password # Declare intent to modify globals
-
-    # Initialize global Uyuni connection details from environment variables
-    # This needs to be done before any mcp.tool function is called by the mcp server.
-    url_env = os.environ.get('UYUNI_SERVER')
-    if not url_env:
-        print("Error: UYUNI_SERVER environment variable not set.", file=sys.stderr)
-        sys.exit(1)
-    url = 'https://' + url_env
-
-    try:
-        username = os.environ['UYUNI_USER']
-        password = os.environ['UYUNI_PASS']
-    except KeyError as e:
-        print(f"Error: Environment variable {e} not set.", file=sys.stderr)
-        sys.exit(1)
-
-    # Initialize and run the server
-    mcp.run(transport='stdio')
+def main():
+    
+    mcp.run(transport="streamable-http")
