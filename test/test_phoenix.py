@@ -6,13 +6,59 @@ import asyncio
 import pandas as pd
 from google import genai
 from google.genai import types
-from phoenix.evals import QAEvaluator, run_evals, LiteLLMModel
+from phoenix.evals import llm_classify, LiteLLMModel
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 TEST_CASES_FILE = 'test_cases_sys.json'
 TEST_CONFIG_FILE = 'test_config.json'
 MCP_CONFIG_FILE = 'config.json'
+
+QA_PROMPT_TEMPLATE = """
+You are an expert evaluator. Your task is to evaluate the quality of the generated answer against the provided reference answer.
+Determine if the generated answer is correct based on the reference.
+
+Input: {input}
+Reference: {reference}
+Output: {output}
+
+Is the Output correct given the Reference?
+Respond with "correct" or "incorrect" and provide a brief explanation.
+"""
+
+TOOL_SELECTION_TEMPLATE = """
+You are an expert evaluator. Your task is to evaluate if the AI agent selected the correct tools to solve the problem.
+
+Input: {input}
+Execution Trace:
+{trace}
+
+Did the agent select the appropriate tools?
+Respond with "correct" or "incorrect" and provide a brief explanation.
+"""
+
+TOOL_INVOCATION_TEMPLATE = """
+You are an expert evaluator. Your task is to evaluate if the AI agent invoked the tools with the correct arguments.
+
+Input: {input}
+Execution Trace:
+{trace}
+
+Were the tools invoked with correct arguments?
+Respond with "correct" or "incorrect" and provide a brief explanation.
+"""
+
+RESPONSE_HANDLING_TEMPLATE = """
+You are an expert evaluator. Your task is to evaluate if the AI agent correctly used the tool outputs to generate the final response.
+
+Execution Trace:
+{trace}
+Final Output: {output}
+Reference: {reference}
+
+Did the agent correctly use the tool outputs?
+Respond with "correct" or "incorrect" and provide a brief explanation.
+"""
 
 def load_vars():
     config_path = os.path.join(os.path.dirname(__file__), TEST_CONFIG_FILE)
@@ -66,7 +112,7 @@ def sanitize_gemini_schema(schema):
                 
     return new_schema
 
-async def run_mcp_agent(prompt: str, model: str = None) -> str:
+async def run_mcp_agent(prompt: str, model: str = None) -> tuple[str, str]:
     if not model:
         model = os.environ.get("AGENT_MODEL", "gemini-1.5-flash-latest")
     server_params = StdioServerParameters(
@@ -101,6 +147,7 @@ async def run_mcp_agent(prompt: str, model: str = None) -> str:
             )
 
             response = await chat.send_message(prompt)
+            trace_logs = []
             
             while response.candidates and response.candidates[0].content.parts:
                 parts = response.candidates[0].content.parts
@@ -110,24 +157,29 @@ async def run_mcp_agent(prompt: str, model: str = None) -> str:
                 
                 async def call_and_prepare_response(fc_part):
                     fc = fc_part.function_call
-                    result = await session.call_tool(fc.name, dict(fc.args))
+                    args = dict(fc.args)
+                    result = await session.call_tool(fc.name, args)
                     tool_output = "\n".join([c.text for c in result.content if c.type == "text"])
+                    log_entry = f"Call: {fc.name}({args})\nOutput: {tool_output}"
                     return types.Part(
                         function_response=types.FunctionResponse(
                             name=fc.name,
                             response={"result": tool_output}
                         )
-                    )
+                    ), log_entry
 
-                tool_responses = await asyncio.gather(
+                results = await asyncio.gather(
                     *(call_and_prepare_response(fc_part) for fc_part in fc_parts)
                 )
                 
+                tool_responses = [r[0] for r in results]
+                trace_logs.extend([r[1] for r in results])
+                
                 response = await chat.send_message(tool_responses)
 
-            return response.text
+            return response.text, "\n\n".join(trace_logs)
 
-def query_mcp_server(prompt: str) -> str:
+def query_mcp_server(prompt: str) -> tuple[str, str]:
     return asyncio.run(run_mcp_agent(prompt))
 
 def load_test_cases():
@@ -150,35 +202,45 @@ def test_uyuni_mcp_phoenix(test_case):
     prompt = prompt_template.format(**VARS)
     expected_output = expected_template.format(**VARS)
 
-    actual_output = query_mcp_server(prompt)
+    actual_output, trace = query_mcp_server(prompt)
 
     judge_model = os.environ.get("JUDGE_MODEL", "gemini-1.5-flash-latest")
     if not judge_model.startswith("gemini/"):
         judge_model = f"gemini/{judge_model}"
     eval_model = LiteLLMModel(model=judge_model)
-    qa_correctness_evaluator = QAEvaluator(model=eval_model)
 
     test_df = pd.DataFrame([{
         "input": prompt,
         "output": actual_output,
         "reference": expected_output,
+        "trace": trace,
     }])
 
-    eval_results = run_evals(
-        dataframe=test_df,
-        evaluators=[qa_correctness_evaluator],
-    )
+    metrics = {
+        "QA Correctness": QA_PROMPT_TEMPLATE,
+        "Tool Selection": TOOL_SELECTION_TEMPLATE,
+        "Tool Invocation": TOOL_INVOCATION_TEMPLATE,
+        "Response Handling": RESPONSE_HANDLING_TEMPLATE,
+    }
 
-    correctness_df = eval_results[0]
-    result_row = correctness_df.iloc[0]
-    label = str(result_row["label"])
-    score = result_row.get("score", "N/A")
-    explanation = result_row.get("explanation") or result_row.get("reasoning")
+    failures = []
 
-    if not explanation:
-        explanation = f"No explanation provided. Score: {score}. Available columns: {list(correctness_df.columns)}"
+    for metric_name, template in metrics.items():
+        results_df = llm_classify(
+            dataframe=test_df,
+            template=template,
+            model=eval_model,
+            rails=["correct", "incorrect"],
+            provide_explanation=True
+        )
+        result_row = results_df.iloc[0]
+        label = str(result_row["label"])
+        explanation = result_row.get("explanation") or result_row.get("reasoning") or "No explanation provided."
+        
+        if label.lower() != "correct":
+            failures.append(f"{metric_name}: {explanation}")
 
-    if label.lower() != "correct":
+    if failures:
         error_message = (
             f"\n--- Phoenix Test Failed ---\n"
             f"Test Case ID: {test_id}\n"
@@ -186,6 +248,6 @@ def test_uyuni_mcp_phoenix(test_case):
             f"Expected Output Hint: {expected_output}\n"
             f"----- ACTUAL OUTPUT -----\n{actual_output}\n"
             f"----- END ACTUAL OUTPUT -----\n"
-            f"Reason: {explanation}"
+            f"Failures:\n" + "\n".join(failures)
         )
         pytest.fail(error_message)
