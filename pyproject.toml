@@ -74,6 +74,10 @@ dev-dependencies = [
     "pytest>=8.3.5",
     "pytest-asyncio>=0.26.0",
     "respx>=0.22.0",
+    "pandas",
+    "google-generativeai",
+    "arize-phoenix",
+    "litellm",
 ]
 # For a flat layout with mcp_server_uyuni.py in the root,
 # Hatchling's auto-detection will find it when 'packages' is omitted.
